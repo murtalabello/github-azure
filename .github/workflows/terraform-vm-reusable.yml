@@ -30,7 +30,7 @@ permissions:
   pull-requests: write
 
 env:
-  # One app registration per environment, each scoped to its own subscription.
+  # One managed identity per environment, each scoped to its own subscription.
   ARM_CLIENT_ID: ${{ inputs.environment == 'prod' && vars.AZURE_CLIENT_ID_PROD || vars.AZURE_CLIENT_ID_DEV }}
   ARM_SUBSCRIPTION_ID: ${{ inputs.environment == 'prod' && vars.AZURE_SUBSCRIPTION_ID_PROD || vars.AZURE_SUBSCRIPTION_ID_DEV }}
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -53,6 +53,9 @@ jobs:
       run:
         working-directory: ${{ inputs.working_directory }}
     steps:
+      # Checkout first: the job's default working-directory only exists after it.
+      - uses: actions/checkout@v4
+
       - name: Guard destroy
         if: inputs.action == 'destroy' && inputs.confirm != inputs.environment
         run: |
@@ -66,8 +69,6 @@ jobs:
             if [ -z "${!v}" ]; then echo "::error::$v is empty — run scripts/bootstrap-azure-oidc.sh for ${{ inputs.environment }}"; missing=1; fi
           done
           exit $missing
-
-      - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
