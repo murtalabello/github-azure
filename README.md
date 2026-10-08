@@ -46,6 +46,11 @@ GitHub job ──OIDC token (sub = repo:OWNER/REPO:...)──▶ managed identit
 | plan on `main` | `repo:OWNER/REPO:ref:refs/heads/main` | dev + prod identities |
 | apply | `repo:OWNER/REPO:environment:dev` / `:prod` | only that env's identity |
 
+**Subjects with immutable IDs.** GitHub may issue subjects as `repo:OWNER@<owner-id>/REPO@<repo-id>:...`
+(this repo does: `repo:murtalabello@61387158/github-azure@1410712234:...`). Azure must trust that exact form,
+or sign-in fails with `AADSTS700213`. Pass it to the bootstrap script with `-S 'OWNER@<id>/REPO@<id>'`; the
+workflow's *Check Azure sign-in and state access* step prints the subject GitHub actually sends.
+
 The workflow picks the identity with `ARM_CLIENT_ID` / `ARM_SUBSCRIPTION_ID` per environment; Terraform's azurerm
 provider and backend do the OIDC exchange themselves (`ARM_USE_OIDC=true`), so no `azure/login` step is needed.
 

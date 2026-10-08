@@ -25,19 +25,24 @@
 # Usage (from the repo root):
 #   ./scripts/bootstrap-azure-oidc.sh -e dev  -s <dev-sub-id>  -r owner/repo [-l southcentralus] [-k ~/.ssh/id_rsa.pub]
 #   ./scripts/bootstrap-azure-oidc.sh -e prod -s <prod-sub-id> -r owner/repo -p <github-reviewer-login>
+#
+# -S <subject-repo>: the repo part of the OIDC subject, when GitHub issues tokens with
+#   immutable IDs, e.g. -S 'owner@123/repo@456' for 'repo:owner@123/repo@456:...'.
+#   The workflow's "Check Azure sign-in" step prints the subject GitHub actually sends.
 set -euo pipefail
 
 LOCATION="southcentralus"
 REVIEWER=""
 SSH_KEY_FILE=""
 SKIP_GITHUB="false"
+SUBJECT_REPO=""
 ENV_NAME=""
 SUB_ID=""
 REPO=""
 
 usage() { sed -n '2,30p' "$0"; exit 1; }
 
-while getopts "e:s:r:l:p:k:Gh" opt; do
+while getopts "e:s:r:l:p:k:S:Gh" opt; do
   case $opt in
     e) ENV_NAME="$OPTARG" ;;
     s) SUB_ID="$OPTARG" ;;
@@ -46,11 +51,13 @@ while getopts "e:s:r:l:p:k:Gh" opt; do
     p) REVIEWER="$OPTARG" ;;
     k) SSH_KEY_FILE="$OPTARG" ;;
     G) SKIP_GITHUB="true" ;;
+    S) SUBJECT_REPO="$OPTARG" ;;
     *) usage ;;
   esac
 done
 
 [[ -z "$ENV_NAME" || -z "$SUB_ID" || -z "$REPO" ]] && usage
+SUBJECT_REPO="${SUBJECT_REPO:-$REPO}"
 [[ "$ENV_NAME" =~ ^(dev|prod)$ ]] || { echo "env must be dev or prod"; exit 1; }
 for bin in az jq; do command -v "$bin" >/dev/null || { echo "missing: $bin"; exit 1; }; done
 
@@ -114,9 +121,11 @@ add_fic() {
 }
 
 log "Federated credentials"
-add_fic "gh-env-${ENV_NAME}"   "repo:${REPO}:environment:${ENV_NAME}"
-add_fic "gh-pull-request"      "repo:${REPO}:pull_request"
-add_fic "gh-branch-main"       "repo:${REPO}:ref:refs/heads/main"
+# Names get a suffix when the subject uses immutable IDs, so both formats can coexist.
+FIC_SUFFIX=""; [[ "$SUBJECT_REPO" != "$REPO" ]] && FIC_SUFFIX="-ids"
+add_fic "gh-env-${ENV_NAME}${FIC_SUFFIX}" "repo:${SUBJECT_REPO}:environment:${ENV_NAME}"
+add_fic "gh-pull-request${FIC_SUFFIX}"    "repo:${SUBJECT_REPO}:pull_request"
+add_fic "gh-branch-main${FIC_SUFFIX}"     "repo:${SUBJECT_REPO}:ref:refs/heads/main"
 
 # ---------------------------------------------------------------------- RBAC
 assign() {
