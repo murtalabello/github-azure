@@ -48,6 +48,10 @@ jobs:
       fail-fast: false
       matrix:
         environment: [dev, prod]
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/terraform-vm-reusable.yml
     with:
       environment: ${{ matrix.environment }}
@@ -55,6 +59,10 @@ jobs:
 
   dev:
     if: github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/terraform-vm-reusable.yml
     with:
       environment: dev
@@ -63,6 +71,10 @@ jobs:
   prod:
     if: github.event_name == 'push'
     needs: dev
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/terraform-vm-reusable.yml
     with:
       environment: prod
@@ -70,6 +82,10 @@ jobs:
 
   manual:
     if: github.event_name == 'workflow_dispatch'
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
     uses: ./.github/workflows/terraform-vm-reusable.yml
     with:
       environment: ${{ inputs.environment }}

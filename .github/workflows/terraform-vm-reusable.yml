@@ -44,6 +44,11 @@ jobs:
   plan:
     name: plan (${{ inputs.environment }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
     concurrency:
       group: tfstate-vm-${{ inputs.environment }}
       cancel-in-progress: false
@@ -68,6 +73,12 @@ jobs:
           for v in ARM_CLIENT_ID ARM_SUBSCRIPTION_ID ARM_TENANT_ID; do
             if [ -z "${!v}" ]; then echo "::error::$v is empty — run scripts/bootstrap-azure-oidc.sh for ${{ inputs.environment }}"; missing=1; fi
           done
+          # Without id-token: write there is no OIDC token and the azurerm backend
+          # silently retries other auth methods instead of failing.
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "::error::No GitHub OIDC token available — the job needs 'permissions: id-token: write'."
+            missing=1
+          fi
           exit $missing
 
       - uses: hashicorp/setup-terraform@v3
@@ -157,6 +168,10 @@ jobs:
     # The GitHub environment carries the approval gate (required reviewers on prod)
     # and is what the Azure federated credential trusts for apply.
     environment: ${{ inputs.environment }}
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
     concurrency:
       group: tfstate-vm-${{ inputs.environment }}
       cancel-in-progress: false
