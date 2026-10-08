@@ -1,0 +1,193 @@
+# Reusable plan -> (approve) -> apply workflow for one environment.
+# Called by vm-deploy.yml. Not triggered directly.
+name: terraform-vm (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev | prod
+        type: string
+        required: true
+      action:
+        description: plan | apply | destroy
+        type: string
+        default: plan
+      confirm:
+        description: Must equal the environment name when action = destroy
+        type: string
+        default: ""
+      working_directory:
+        type: string
+        default: infra/vm
+      terraform_version:
+        type: string
+        default: 1.9.8
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  # One app registration per environment, each scoped to its own subscription.
+  ARM_CLIENT_ID: ${{ inputs.environment == 'prod' && vars.AZURE_CLIENT_ID_PROD || vars.AZURE_CLIENT_ID_DEV }}
+  ARM_SUBSCRIPTION_ID: ${{ inputs.environment == 'prod' && vars.AZURE_SUBSCRIPTION_ID_PROD || vars.AZURE_SUBSCRIPTION_ID_DEV }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_USE_OIDC: "true"
+  ARM_USE_AZUREAD: "true"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_admin_ssh_public_key: ${{ vars.ADMIN_SSH_PUBLIC_KEY }}
+
+jobs:
+  plan:
+    name: plan (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    concurrency:
+      group: tfstate-vm-${{ inputs.environment }}
+      cancel-in-progress: false
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Guard destroy
+        if: inputs.action == 'destroy' && inputs.confirm != inputs.environment
+        run: |
+          echo "::error::Destroy requires confirm='${{ inputs.environment }}'."
+          exit 1
+
+      - name: Check Azure variables
+        run: |
+          missing=0
+          for v in ARM_CLIENT_ID ARM_SUBSCRIPTION_ID ARM_TENANT_ID; do
+            if [ -z "${!v}" ]; then echo "::error::$v is empty — run scripts/bootstrap-azure-oidc.sh for ${{ inputs.environment }}"; missing=1; fi
+          done
+          exit $missing
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init
+        run: terraform init -backend-config=env/${{ inputs.environment }}.backend.hcl
+
+      - name: terraform validate
+        run: terraform validate -no-color
+
+      - name: terraform plan
+        id: plan
+        run: |
+          destroy_flag=""
+          if [ "${{ inputs.action }}" = "destroy" ]; then destroy_flag="-destroy"; fi
+
+          set +e
+          terraform plan $destroy_flag \
+            -var-file=env/${{ inputs.environment }}.tfvars \
+            -out=tfplan -detailed-exitcode -no-color -lock-timeout=5m
+          code=$?
+          set -e
+
+          if [ $code -eq 1 ]; then exit 1; fi
+          if [ $code -eq 2 ]; then echo "has_changes=true" >> "$GITHUB_OUTPUT"; else echo "has_changes=false" >> "$GITHUB_OUTPUT"; fi
+
+          terraform show -no-color tfplan > plan.txt
+
+          {
+            echo "## Terraform ${{ inputs.action }} — \`${{ inputs.environment }}\`"
+            echo '```'
+            grep -E '^(Plan:|No changes|Changes to Outputs)' plan.txt || true
+            echo '```'
+            echo "<details><summary>Full plan</summary>"
+            echo
+            echo '```hcl'
+            head -c 60000 plan.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+          PLAN_PATH: ${{ inputs.working_directory }}/plan.txt
+        with:
+          script: |
+            const fs = require('fs');
+            const env = process.env.ENV_NAME;
+            let plan = fs.readFileSync(process.env.PLAN_PATH, 'utf8');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated, see job summary)';
+            const marker = `<!-- tf-plan-vm-${env} -->`;
+            const summary = (plan.match(/^(Plan:.*|No changes.*)$/m) || ['(see plan)'])[0];
+            const body = `${marker}\n### Terraform plan — \`${env}\`\n**${summary}**\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>\n\n_Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}_`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number, per_page: 100 });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
+
+      - name: Upload plan
+        if: inputs.action != 'plan' && steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-vm-${{ inputs.environment }}
+          path: |
+            ${{ inputs.working_directory }}/tfplan
+            ${{ inputs.working_directory }}/.terraform.lock.hcl
+          retention-days: 1
+          include-hidden-files: true
+
+  apply:
+    name: ${{ inputs.action }} (${{ inputs.environment }})
+    needs: plan
+    if: inputs.action != 'plan' && needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    # The GitHub environment carries the approval gate (required reviewers on prod)
+    # and is what the Azure federated credential trusts for apply.
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: tfstate-vm-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-vm-${{ inputs.environment }}
+          path: ${{ inputs.working_directory }}
+
+      - name: terraform init
+        run: terraform init -backend-config=env/${{ inputs.environment }}.backend.hcl
+
+      - name: terraform apply
+        run: terraform apply -no-color -lock-timeout=5m tfplan
+
+      - name: Outputs
+        if: inputs.action == 'apply'
+        run: |
+          {
+            echo "## Deployed — \`${{ inputs.environment }}\`"
+            echo '```json'
+            terraform output -json vms
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,77 @@
+# VM deployment pipeline
+#   PR to main        -> plan dev + prod, plan posted as PR comment
+#   push/merge to main -> plan+apply dev, then plan -> approval -> apply prod
+#   manual dispatch    -> plan / apply / destroy one environment (run from main)
+name: vm-deploy
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - infra/vm/**
+      - modules/vm/**
+      - .github/workflows/vm-deploy.yml
+      - .github/workflows/terraform-vm-reusable.yml
+  push:
+    branches: [main]
+    paths:
+      - infra/vm/**
+      - modules/vm/**
+      - .github/workflows/vm-deploy.yml
+      - .github/workflows/terraform-vm-reusable.yml
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, prod]
+        default: dev
+      action:
+        description: Terraform action
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+      confirm:
+        description: For destroy only — type the environment name to confirm
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-plan:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    uses: ./.github/workflows/terraform-vm-reusable.yml
+    with:
+      environment: ${{ matrix.environment }}
+      action: plan
+
+  dev:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/terraform-vm-reusable.yml
+    with:
+      environment: dev
+      action: apply
+
+  prod:
+    if: github.event_name == 'push'
+    needs: dev
+    uses: ./.github/workflows/terraform-vm-reusable.yml
+    with:
+      environment: prod
+      action: apply
+
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/terraform-vm-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      action: ${{ inputs.action }}
+      confirm: ${{ inputs.confirm }}
