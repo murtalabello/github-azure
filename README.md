@@ -185,10 +185,10 @@ from this repo's own workflow jobs, because of the federated credentials.
 | `AZURE_TENANT_ID` | `a0859c2c-6006-4f6c-8e7f-69a8fca8a849` | Both environments |
 | `AZURE_SUBSCRIPTION_ID_DEV` | `4db12431-b606-4b3d-a0bf-da48a2913526` | dev subscription |
 | `AZURE_CLIENT_ID_DEV` | `e53e62b3-39e3-403a-870c-a2fc8d05169d` | client ID of the dev **apply** identity `id-gh-murtalabello-github-azure-dev` |
-| `AZURE_CLIENT_ID_PLAN_DEV` | `PLAN_DEV_CLIENT_ID` | client ID of the dev **plan** identity `id-gh-murtalabello-github-azure-dev-plan` |
+| `AZURE_CLIENT_ID_PLAN_DEV` | `5b75fc9c-3bd3-45a1-9b92-8c7873e11ffc` | client ID of the dev **plan** identity `id-gh-murtalabello-github-azure-dev-plan` |
 | `AZURE_SUBSCRIPTION_ID_PROD` | `184d2ede-e572-4d93-95bd-bfd15f8f9d24` | prod subscription |
 | `AZURE_CLIENT_ID_PROD` | `3663ea7b-1640-4fb6-9a22-4ac9b4c8eb2a` | client ID of the prod **apply** identity `id-gh-murtalabello-github-azure-prod` |
-| `AZURE_CLIENT_ID_PLAN_PROD` | `PLAN_PROD_CLIENT_ID` | client ID of the prod **plan** identity `id-gh-murtalabello-github-azure-prod-plan` |
+| `AZURE_CLIENT_ID_PLAN_PROD` | `7398c098-2b70-4b57-9072-8484be08c9b9` | client ID of the prod **plan** identity `id-gh-murtalabello-github-azure-prod-plan` |
 | `ADMIN_SSH_PUBLIC_KEY` | `ssh-ed25519 AAAA… muri@SandboxHost…` | **Public** half of the SSH key put on the VMs |
 
 ### Repository secrets (Settings → Secrets and variables → Actions → **Secrets**)
