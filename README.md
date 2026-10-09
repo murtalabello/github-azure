@@ -28,7 +28,7 @@ There are **two layers**. This is the most important thing to understand.
 
 | Layer | What it is | Created by | Deleted by `vm-destroy`? |
 |---|---|---|---|
-| **A. Foundation** | Terraform state storage, the identity GitHub signs in as, its permissions, GitHub settings | **Once, by hand**: `scripts/bootstrap-azure-oidc.sh` (Azure CLI + GitHub CLI). **Not Terraform.** | **No.** It must survive, because Terraform needs it to run at all. |
+| **A. Foundation** | Terraform state storage, the two identities GitHub signs in as (plan and apply), their permissions, GitHub settings | **Once, by hand**: `scripts/bootstrap-azure-oidc.sh` (Azure CLI + GitHub CLI). **Not Terraform.** | **No.** It must survive, because Terraform needs it to run at all. |
 | **B. Workload** | The VMs and their network | **Terraform**, run by GitHub Actions | **Yes** |
 
 Why is the foundation not in Terraform? Terraform needs somewhere to keep its state file and
@@ -47,7 +47,7 @@ Created once per environment, inside that environment's subscription.
 | **Apply identity** (user-assigned managed identity) | `id-gh-murtalabello-github-azure-dev` | `id-gh-murtalabello-github-azure-prod` | The Azure "user" that **apply and destroy** jobs sign in as. Can change things. Has no password. |
 | ↳ Role: **Contributor** on the whole subscription | ✅ | ✅ | Create, change and delete resources (VMs, networks…) in its own subscription. |
 | ↳ Role: **Storage Blob Data Contributor** on the storage account | ✅ | ✅ | Read and write the state file. |
-| ↳ Federated credentials | `gh-env-dev-ids` (+ unused `gh-env-dev`) | `gh-env-prod-ids` (+ unused `gh-env-prod`) | Only jobs running **inside the GitHub environment** may sign in. See [section 2](#2-how-it-is-all-wired-together). |
+| ↳ Federated credentials | `gh-env-dev-ids` | `gh-env-prod-ids` | Only jobs running **inside the GitHub environment** may sign in. See [section 2](#2-how-it-is-all-wired-together). |
 | **Plan identity** (user-assigned managed identity) | `id-gh-murtalabello-github-azure-dev-plan` | `id-gh-murtalabello-github-azure-prod-plan` | The Azure "user" that **plan** jobs sign in as. **Read-only.** Has no password. |
 | ↳ Role: **Reader** on the whole subscription | ✅ | ✅ | See resources, but not change them. |
 | ↳ Role: **Storage Blob Data Reader** on the storage account | ✅ | ✅ | Read the state file, but not change it. |
@@ -123,7 +123,6 @@ the subjects it trusts. This repo's tokens use GitHub's **ID-based** subject for
 | **plan** (read-only) | `gh-branch-main-ids` | `repo:murtalabello@61387158/github-azure@1410712234:ref:refs/heads/main` | Plan jobs running from `main` (pushes and "Run workflow") |
 | **plan** (read-only) | `gh-pull-request-ids` | `repo:murtalabello@61387158/github-azure@1410712234:pull_request` | Plan jobs on pull requests |
 | **apply** (write) | `gh-env-dev-ids` / `gh-env-prod-ids` | `repo:murtalabello@61387158/github-azure@1410712234:environment:dev` (or `:prod`) | Apply and destroy jobs, which run **inside** the GitHub environment |
-| **apply** (write) | `gh-env-dev` / `gh-env-prod` | same, but `repo:murtalabello/github-azure:…` | **Unused.** Old name-based format, created first. Harmless; safe to delete. |
 
 **What this protects.** The only identity that can change anything signs in **only** from a job
 inside the `dev` or `prod` GitHub environment, and both environments only accept jobs from `main`:
@@ -446,7 +445,7 @@ GitHub actually sends.
 |---|---|---|
 | `AADSTS700213: No matching federated identity record` | The job's token subject is not in the identity's federated credentials. | Add a credential with the subject printed by the *Check Azure sign-in* step. |
 | `No GitHub OIDC token available` | The job is not allowed to request a sign-in token. | The job needs `permissions: id-token: write` (already set in these workflows). |
-| `… is empty — run scripts/bootstrap-azure-oidc.sh` | A repo variable is missing. | Set it in Settings → Variables (values in [section 3](#3-everything-stored-in-github)). |
+| `ARM_… is empty — set the AZURE_* repo variables for <env>` | A repo variable is missing. | Set it in Settings → Variables (values in [section 3](#3-everything-stored-in-github)). |
 | State container returned HTTP 403 | The identity cannot read the state storage. | Plan identity needs **Storage Blob Data Reader**, apply identity needs **Storage Blob Data Contributor**, on the storage account. |
 | `AuthorizationFailed … does not have authorization to perform action '…/write'` in a **plan** job | Something tried to change Azure with the read-only identity. | Expected protection. Only apply jobs may change things. |
 | `Deployment … not allowed … branch protection rules` / job rejected by environment | A job from a branch other than `main` tried to use the `dev`/`prod` environment. | Expected protection. Merge to `main` first. |
