@@ -1,0 +1,35 @@
+# Tear down the VMs and network of one environment. Manual only.
+#   Run workflow -> pick environment -> type the environment name in "confirm".
+#   Shows a destroy plan first; prod also waits for approval before anything is deleted.
+# Terraform state storage and the GitHub/Azure trust (scripts/bootstrap-azure-oidc.sh) are not touched.
+name: vm-destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to destroy
+        type: choice
+        options: [dev, prod]
+        default: dev
+      confirm:
+        description: Type the environment name again to confirm
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  destroy:
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/terraform-vm-reusable.yml
+    with:
+      environment: ${{ inputs.environment }}
+      action: destroy
+      confirm: ${{ inputs.confirm }}

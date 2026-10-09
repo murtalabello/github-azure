@@ -1,7 +1,8 @@
 # VM deployment pipeline
-#   PR to main        -> plan dev + prod, plan posted as PR comment
-#   push/merge to main -> plan+apply dev, then plan -> approval -> apply prod
-#   manual dispatch    -> plan / apply / destroy one environment (run from main)
+#   PR to main         -> plan dev + prod, plan posted as PR comment
+#   push/merge to main -> plan+apply dev, then plan prod (prod is NOT applied automatically)
+#   manual dispatch    -> plan / apply one environment (prod apply waits for approval)
+# Tearing down lives in vm-destroy.yml.
 name: vm-deploy
 
 on:
@@ -29,12 +30,8 @@ on:
       action:
         description: Terraform action
         type: choice
-        options: [plan, apply, destroy]
+        options: [plan, apply]
         default: plan
-      confirm:
-        description: For destroy only — type the environment name to confirm
-        type: string
-        default: ""
 
 permissions:
   id-token: write
@@ -78,7 +75,8 @@ jobs:
     uses: ./.github/workflows/terraform-vm-reusable.yml
     with:
       environment: prod
-      action: apply
+      # Plan only: prod is applied by hand with "Run workflow" (environment=prod, action=apply).
+      action: plan
 
   manual:
     if: github.event_name == 'workflow_dispatch'
@@ -90,4 +88,3 @@ jobs:
     with:
       environment: ${{ inputs.environment }}
       action: ${{ inputs.action }}
-      confirm: ${{ inputs.confirm }}
