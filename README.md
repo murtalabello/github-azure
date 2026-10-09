@@ -267,7 +267,7 @@ Everything below is in the repo's **Actions** tab → choose the pipeline → **
 | | dev | prod |
 |---|---|---|
 | Layer A (foundation) | ✅ exists | ✅ exists |
-| Layer B (VMs and network) | ❌ **destroyed** with `vm-destroy` (VM, disk and network: 7 resources) | ❌ network **destroyed** with `vm-destroy` (7 resources). The VMs were never created (quota). |
+| Layer B (VMs and network) | ✅ **deployed**: `vm-app-dev-01` (10.10.1.4, no public IP), 7 resources | ❌ network **destroyed** with `vm-destroy` (7 resources). The VMs were never created (quota). |
 | Ready to deploy again | ✅ yes | ⚠️ waiting on Azure **quota** |
 
 **Prod quota:** the prod subscription allows **0 vCPUs** of the `Standard DSv5` family in South
@@ -275,11 +275,12 @@ Central US, and prod needs 4 (two `Standard_D2s_v5`). After the quota request is
 (Azure portal → Subscriptions → prod → **Usage + quotas** → *Standard DSv5 Family vCPUs* ≥ 4),
 run **vm-deploy** with `prod` / `apply`. No code change is needed.
 
-**Note:** the next push to `main` that changes `infra/`, `modules/` or the workflow files will
-**recreate dev automatically**.
+**Note:** a push to `main` that changes `infra/`, `modules/` or the workflow files **applies dev
+automatically**. Commits with `[skip ci]` in the message skip that.
 
-**Cost while destroyed:** only the two state storage accounts (a few cents a month). Managed
-identities, role assignments and resource provider registrations are free.
+**Cost:** dev's `Standard_B2s` VM and its disk while dev is deployed, plus the two state storage
+accounts (a few cents a month). Managed identities, role assignments and resource provider
+registrations are free.
 
 ---
 
