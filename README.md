@@ -61,7 +61,7 @@ touch the Terraform state storage or the sign-in setup, so you can deploy again 
 | | dev | prod |
 |---|---|---|
 | VMs | ✅ `vm-app-dev-01` (`Standard_B2s`, 10.10.1.4) | ⏸ not deployed: waiting for Azure quota |
-| Network | ✅ created | ✅ created (resource group, VNet, subnet, NSG, 2 NICs) |
+| Network | ✅ created | — none (removed with `vm-destroy`; `vm-deploy` apply recreates it) |
 
 **Why prod is paused:** the prod subscription has **0 vCPU quota** for the `Standard DSv5`
 family in South Central US, and prod uses two `Standard_D2s_v5` VMs (4 vCPUs total). Once the
