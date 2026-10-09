@@ -266,9 +266,12 @@ Everything below is in the repo's **Actions** tab → choose the pipeline → **
 
 | | dev | prod |
 |---|---|---|
-| Layer A (foundation) | ✅ exists | ✅ exists |
+| Layer A (foundation) | ❌ **deleted** in Azure. Rebuild with [section 8](#8-setting-it-up-again-from-zero). | ❌ **deleted** in Azure. Rebuild with [section 8](#8-setting-it-up-again-from-zero). |
 | Layer B (VMs and network) | ❌ **destroyed** with `vm-destroy` (VM, disk and network: 7 resources). Recreate with `vm-deploy` dev / apply. | ❌ network **destroyed** with `vm-destroy` (7 resources). The VMs were never created (quota). |
-| Ready to deploy again | ✅ yes | ⚠️ waiting on Azure **quota** |
+| Ready to deploy again | After section 8 | After section 8, plus Azure **quota** |
+
+Until layer A is rebuilt, every pipeline run fails at *Check Azure sign-in and state access*:
+the identities and state storage the GitHub variables point at no longer exist.
 
 **Prod quota:** the prod subscription allows **0 vCPUs** of the `Standard DSv5` family in South
 Central US, and prod needs 4 (two `Standard_D2s_v5`). After the quota request is approved
@@ -278,9 +281,8 @@ run **vm-deploy** with `prod` / `apply`. No code change is needed.
 **Note:** a push to `main` that changes `infra/`, `modules/` or the workflow files **applies dev
 automatically**. Commits with `[skip ci]` in the message skip that.
 
-**Cost right now:** only the two state storage accounts (a few cents a month). Managed identities,
-role assignments and resource provider registrations are free. When dev is deployed, its
-`Standard_B2s` VM and disk are billed too.
+**Cost right now:** nothing. Once rebuilt, the two state storage accounts cost a few cents a
+month, and dev's `Standard_B2s` VM and disk are billed while dev is deployed.
 
 ---
 
@@ -330,42 +332,111 @@ Resource provider registrations can be left alone. They cost nothing.
 
 ## 8. Setting it up again from zero
 
-Only needed if layer A was deleted, or for a new repo or subscription. Run from the repo root in
-Azure Cloud Shell, signed in as an **Owner** of each subscription, with `gh auth login` done:
+Use this when layer A (the foundation) has been deleted, for example after
+[section 7](#7-deleting-everything-completely), or for a new subscription or repo. Everything below
+runs in **Azure Cloud Shell (Bash)**, signed in to Azure as an **Owner** of both subscriptions.
+It takes about 10 minutes.
+
+**What you end up with:** new state storage, new identities and new GitHub variables. The **storage
+account names and client IDs will be different** from the ones in this README (the script prints
+the new ones). Terraform starts with an **empty state**, so make sure no old `rg-app-<env>-vm`
+resource groups are left over, or Terraform will fail when it tries to create them again.
+
+### Step 1: tools and sign-in
 
 ```bash
-# 1. An SSH key for the VMs. Keep the private key (~/.ssh/id_ed25519) safe somewhere else too.
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+gh auth status || gh auth login        # GitHub.com → HTTPS → Yes (authenticate Git) → web browser
+gh auth setup-git                      # lets git push with the same login
+git config --global user.name  "Your Name"
+git config --global user.email "you@example.com"
+az account show --query user.name -o tsv   # should show your Azure account
+```
 
-# 2. Foundation for each environment. -S is the ID-based token subject (see section 2).
-S='murtalabello@61387158/github-azure@1410712234'
+### Step 2: get the code
+
+```bash
+cd ~ && rm -rf github-azure
+gh repo clone murtalabello/github-azure && cd github-azure
+chmod +x scripts/bootstrap-azure-oidc.sh
+```
+
+### Step 3: an SSH key for the VMs
+
+```bash
+[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+```
+
+Cloud Shell can lose files when it restarts. **Copy `~/.ssh/id_ed25519` (the private key) somewhere
+safe**, or you will not be able to log in to the VMs later.
+
+### Step 4: switch on the Azure services (safe to repeat)
+
+```bash
+for sub in 4db12431-b606-4b3d-a0bf-da48a2913526 184d2ede-e572-4d93-95bd-bfd15f8f9d24; do
+  for p in Microsoft.Storage Microsoft.ManagedIdentity Microsoft.Compute Microsoft.Network; do
+    az provider register -n $p --subscription $sub
+  done
+done
+```
+
+### Step 5: build the foundation (layer A) for both environments
+
+```bash
+S='murtalabello@61387158/github-azure@1410712234'   # this repo's ID-based token subject
 ./scripts/bootstrap-azure-oidc.sh -e dev  -s 4db12431-b606-4b3d-a0bf-da48a2913526 \
   -r murtalabello/github-azure -S "$S" -k ~/.ssh/id_ed25519.pub
 ./scripts/bootstrap-azure-oidc.sh -e prod -s 184d2ede-e572-4d93-95bd-bfd15f8f9d24 \
   -r murtalabello/github-azure -S "$S" -p murtalabello
-
-# 3. The script rewrote infra/vm/env/*.backend.hcl with the new storage account names. Commit them.
-git add infra/vm/env/*.backend.hcl && git commit -m "Point Terraform at the new state storage" && git push
 ```
 
-What the script does, in order: creates `rg-tfstate-<env>` and the locked-down state storage →
-creates the **apply** identity (environment sign-in only; **Contributor** + **Storage Blob Data
-Contributor**) → creates the **plan** identity (`main` and pull-request sign-in; **Reader** +
-**Storage Blob Data Reader**) → sets the GitHub variables → creates the GitHub environment
-(`main` only; prod also gets you as required reviewer) → writes the backend file. It is safe to
-re-run: it skips whatever already exists.
+Each run ends with `==> Done: <env>` and a summary of the tenant, subscription, both identities
+and the storage account. What it does, in order:
 
-Options: `-G` skips the GitHub part (it prints the values to set by hand); `-l <region>` changes
-the region (default `southcentralus`). Leave out `-S` if your repo's tokens use the plain
-`repo:<owner>/<repo>:…` format; the *Check Azure sign-in* step prints the format GitHub actually sends.
+1. creates `rg-tfstate-<env>` and the locked-down state storage account + `tfstate` container
+2. creates the **apply** identity: environment sign-in only, **Contributor** + **Storage Blob Data Contributor**
+3. creates the **plan** identity: `main` and pull-request sign-in, **Reader** + **Storage Blob Data Reader**
+4. sets the GitHub variables (`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID_<ENV>`,
+   `AZURE_CLIENT_ID_<ENV>`, `AZURE_CLIENT_ID_PLAN_<ENV>`, and `ADMIN_SSH_PUBLIC_KEY` from `-k`)
+5. creates the GitHub environment, deployable from `main` only (prod also gets you as required reviewer)
+6. rewrites `infra/vm/env/<env>.backend.hcl` with the new storage account name
 
-**Brand-new subscription?** Register the providers first, or the script and Terraform will fail:
+It is safe to re-run: it skips anything that already exists. If a role assignment step retries
+a few times, that is normal (a new identity takes a moment to appear).
+
+### Step 6: save the new state locations to the repo
 
 ```bash
-for p in Microsoft.Storage Microsoft.ManagedIdentity Microsoft.Compute Microsoft.Network; do
-  az provider register -n $p --subscription <sub-id>
-done
+git add infra/vm/env/*.backend.hcl
+git commit -m "Point Terraform at the new state storage [skip ci]"
+git push origin main
 ```
+
+`[skip ci]` stops this push from deploying dev straight away. Leave it out if you want dev deployed
+immediately.
+
+### Step 7: check, then deploy
+
+In GitHub → **Actions**:
+
+1. **vm-deploy** → Run workflow → `dev` / `plan`. The *Check Azure sign-in and state access* step
+   must pass, and the plan should say **7 to add**.
+2. Same for `prod` / `plan`: **9 to add**.
+3. Deploy: `dev` / `apply` (runs straight away), and `prod` / `apply` (approve when asked; needs
+   the DSv5 quota, see [section 6](#6-current-status)).
+
+### Optional tidy-up
+
+- **Leftover role assignments.** If the old identities were deleted without removing their roles
+  first, each subscription keeps role assignments for identities that no longer exist. They are
+  harmless. To remove them in the portal: Subscription → **Access control (IAM)** → **Role
+  assignments**; they show as *Identity not found*. Select them and **Remove**.
+- **This README's tables** (sections 1 and 3) list the old storage account names and client IDs.
+  Update them with the values the script printed.
+
+**Options of the script:** `-G` skips the GitHub part (it prints the values to set by hand);
+`-l <region>` changes the region (default `southcentralus`). Leave out `-S` if your repo's tokens
+use the plain `repo:<owner>/<repo>:…` format; the *Check Azure sign-in* step prints the format
+GitHub actually sends.
 
 ---
 
