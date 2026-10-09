@@ -5,16 +5,19 @@
 # What it creates / configures (idempotent — safe to re-run):
 #   Azure (in the target subscription)
 #     - rg-tfstate-<env> + locked-down storage account + "tfstate" container
-#     - User-assigned managed identity "id-gh-<owner>-<repo>-<env>" (no Entra app registration / Graph rights needed)
-#     - Federated credentials (OIDC, no secrets) for:
-#         repo:<owner>/<repo>:environment:<env>   -> apply jobs
-#         repo:<owner>/<repo>:pull_request         -> PR plan jobs
-#         repo:<owner>/<repo>:ref:refs/heads/main  -> plan jobs on main
-#     - RBAC: Contributor on the subscription, Storage Blob Data Contributor on the state account
+#     - Two user-assigned managed identities (no Entra app registration / Graph rights needed):
+#         id-gh-<owner>-<repo>-<env>       apply identity: Contributor on the subscription +
+#                                          Storage Blob Data Contributor on the state account.
+#                                          Trusts only  repo:<owner>/<repo>:environment:<env>
+#         id-gh-<owner>-<repo>-<env>-plan  plan identity (read-only): Reader on the subscription +
+#                                          Storage Blob Data Reader on the state account.
+#                                          Trusts  repo:<owner>/<repo>:ref:refs/heads/main
+#                                          and     repo:<owner>/<repo>:pull_request
 #   GitHub
-#     - Repo variables AZURE_TENANT_ID, AZURE_CLIENT_ID_<ENV>, AZURE_SUBSCRIPTION_ID_<ENV>
+#     - Repo variables AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID_<ENV>,
+#       AZURE_CLIENT_ID_<ENV> (apply) and AZURE_CLIENT_ID_PLAN_<ENV> (plan)
 #     - Optional ADMIN_SSH_PUBLIC_KEY
-#     - Environment <env> (prod: required reviewer + main-only deployments)
+#     - Environment <env>, deployable from main only (prod: plus a required reviewer)
 #   Repo files
 #     - infra/vm/env/<env>.backend.hcl
 #
@@ -63,6 +66,7 @@ for bin in az jq; do command -v "$bin" >/dev/null || { echo "missing: $bin"; exi
 
 ENV_UPPER=$(echo "$ENV_NAME" | tr '[:lower:]' '[:upper:]')
 IDENTITY_NAME="id-gh-${REPO//\//-}-${ENV_NAME}"
+PLAN_IDENTITY_NAME="${IDENTITY_NAME}-plan"
 STATE_RG="rg-tfstate-${ENV_NAME}"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -96,85 +100,90 @@ az storage account blob-service-properties update --account-name "$SA_NAME" -g "
 az storage container-rm create --storage-account "$SA_NAME" -g "$STATE_RG" -n tfstate -o none 2>/dev/null || true
 echo "storage account: $SA_NAME"
 
-# ------------------------------------------------- user-assigned identity
-# A user-assigned managed identity with federated credentials: same OIDC trust as an
+# ------------------------------------------------- user-assigned identities
+# User-assigned managed identities with federated credentials: same OIDC trust as an
 # app registration, but created through ARM only — no Entra/Graph admin rights needed.
-log "Managed identity: $IDENTITY_NAME"
-if ! az identity show -n "$IDENTITY_NAME" -g "$STATE_RG" -o none 2>/dev/null; then
-  az identity create -n "$IDENTITY_NAME" -g "$STATE_RG" -l "$LOCATION" \
-    --tags purpose=github-oidc environment="$ENV_NAME" -o none
-fi
-APP_ID=$(az identity show -n "$IDENTITY_NAME" -g "$STATE_RG" --query clientId -o tsv)
-SP_OBJ_ID=$(az identity show -n "$IDENTITY_NAME" -g "$STATE_RG" --query principalId -o tsv)
-echo "client id: $APP_ID"
-
-add_fic() {
-  local name="$1" subject="$2"
-  if az identity federated-credential show --name "$name" --identity-name "$IDENTITY_NAME" -g "$STATE_RG" -o none 2>/dev/null; then
-    echo "federated credential '$name' exists"
-    return
+ensure_identity() {
+  local name="$1"
+  if ! az identity show -n "$name" -g "$STATE_RG" -o none 2>/dev/null; then
+    az identity create -n "$name" -g "$STATE_RG" -l "$LOCATION" \
+      --tags purpose=github-oidc environment="$ENV_NAME" -o none
   fi
-  az identity federated-credential create --name "$name" --identity-name "$IDENTITY_NAME" -g "$STATE_RG" \
-    --issuer "https://token.actions.githubusercontent.com" \
-    --subject "$subject" --audiences "api://AzureADTokenExchange" -o none
-  echo "federated credential '$name' -> $subject"
 }
 
-log "Federated credentials"
-# Names get a suffix when the subject uses immutable IDs, so both formats can coexist.
-FIC_SUFFIX=""; [[ "$SUBJECT_REPO" != "$REPO" ]] && FIC_SUFFIX="-ids"
-add_fic "gh-env-${ENV_NAME}${FIC_SUFFIX}" "repo:${SUBJECT_REPO}:environment:${ENV_NAME}"
-add_fic "gh-pull-request${FIC_SUFFIX}"    "repo:${SUBJECT_REPO}:pull_request"
-add_fic "gh-branch-main${FIC_SUFFIX}"     "repo:${SUBJECT_REPO}:ref:refs/heads/main"
+add_fic() {
+  local identity="$1" name="$2" subject="$3"
+  if az identity federated-credential show --name "$name" --identity-name "$identity" -g "$STATE_RG" -o none 2>/dev/null; then
+    echo "federated credential '$name' on $identity exists"
+    return
+  fi
+  az identity federated-credential create --name "$name" --identity-name "$identity" -g "$STATE_RG" \
+    --issuer "https://token.actions.githubusercontent.com" \
+    --subject "$subject" --audiences "api://AzureADTokenExchange" -o none
+  echo "federated credential '$name' on $identity -> $subject"
+}
 
-# ---------------------------------------------------------------------- RBAC
 assign() {
-  local role="$1" scope="$2"
+  local principal="$1" role="$2" scope="$3"
   for i in 1 2 3 4 5 6; do
-    if az role assignment create --assignee-object-id "$SP_OBJ_ID" --assignee-principal-type ServicePrincipal \
+    if az role assignment create --assignee-object-id "$principal" --assignee-principal-type ServicePrincipal \
          --role "$role" --scope "$scope" -o none 2>/dev/null; then
       echo "role '$role' on $scope"; return
     fi
-    # Usually SP replication lag right after creation.
+    # Usually identity replication lag right after creation.
     sleep $((i * 10))
   done
   echo "FAILED to assign '$role' on $scope" >&2; exit 1
 }
 
-log "Role assignments"
-assign "Contributor" "/subscriptions/${SUB_ID}"
-assign "Storage Blob Data Contributor" "$SA_ID"
+# Names get a suffix when the subject uses immutable IDs, so both formats can coexist.
+FIC_SUFFIX=""; [[ "$SUBJECT_REPO" != "$REPO" ]] && FIC_SUFFIX="-ids"
+
+log "Apply identity: $IDENTITY_NAME"
+ensure_identity "$IDENTITY_NAME"
+APP_ID=$(az identity show -n "$IDENTITY_NAME" -g "$STATE_RG" --query clientId -o tsv)
+SP_OBJ_ID=$(az identity show -n "$IDENTITY_NAME" -g "$STATE_RG" --query principalId -o tsv)
+add_fic "$IDENTITY_NAME" "gh-env-${ENV_NAME}${FIC_SUFFIX}" "repo:${SUBJECT_REPO}:environment:${ENV_NAME}"
+assign "$SP_OBJ_ID" "Contributor" "/subscriptions/${SUB_ID}"
+assign "$SP_OBJ_ID" "Storage Blob Data Contributor" "$SA_ID"
+
+log "Plan identity (read-only): $PLAN_IDENTITY_NAME"
+ensure_identity "$PLAN_IDENTITY_NAME"
+PLAN_APP_ID=$(az identity show -n "$PLAN_IDENTITY_NAME" -g "$STATE_RG" --query clientId -o tsv)
+PLAN_OBJ_ID=$(az identity show -n "$PLAN_IDENTITY_NAME" -g "$STATE_RG" --query principalId -o tsv)
+add_fic "$PLAN_IDENTITY_NAME" "gh-branch-main${FIC_SUFFIX}"  "repo:${SUBJECT_REPO}:ref:refs/heads/main"
+add_fic "$PLAN_IDENTITY_NAME" "gh-pull-request${FIC_SUFFIX}" "repo:${SUBJECT_REPO}:pull_request"
+assign "$PLAN_OBJ_ID" "Reader" "/subscriptions/${SUB_ID}"
+assign "$PLAN_OBJ_ID" "Storage Blob Data Reader" "$SA_ID"
 
 # -------------------------------------------------------------------- GitHub
 if [[ "$SKIP_GITHUB" == "true" ]]; then
   log "Skipping GitHub config (-G). Set these repo variables yourself:"
   echo "  AZURE_TENANT_ID=$TENANT_ID"
   echo "  AZURE_CLIENT_ID_${ENV_UPPER}=$APP_ID"
+  echo "  AZURE_CLIENT_ID_PLAN_${ENV_UPPER}=$PLAN_APP_ID"
   echo "  AZURE_SUBSCRIPTION_ID_${ENV_UPPER}=$SUB_ID"
 else
 log "GitHub variables on $REPO"
 gh variable set AZURE_TENANT_ID              --repo "$REPO" --body "$TENANT_ID"
 gh variable set "AZURE_CLIENT_ID_${ENV_UPPER}"       --repo "$REPO" --body "$APP_ID"
+gh variable set "AZURE_CLIENT_ID_PLAN_${ENV_UPPER}"  --repo "$REPO" --body "$PLAN_APP_ID"
 gh variable set "AZURE_SUBSCRIPTION_ID_${ENV_UPPER}" --repo "$REPO" --body "$SUB_ID"
 if [[ -n "$SSH_KEY_FILE" ]]; then
   gh variable set ADMIN_SSH_PUBLIC_KEY --repo "$REPO" --body "$(cat "$SSH_KEY_FILE")"
 fi
 
-log "GitHub environment: $ENV_NAME"
-if [[ "$ENV_NAME" == "prod" ]]; then
-  body=$(jq -n '{deployment_branch_policy:{protected_branches:false, custom_branch_policies:true}}')
-  if [[ -n "$REVIEWER" ]]; then
-    rid=$(gh api "users/${REVIEWER}" --jq .id)
-    body=$(echo "$body" | jq --argjson id "$rid" '. + {reviewers:[{type:"User", id:$id}]}')
-  fi
-  echo "$body" | gh api -X PUT "repos/${REPO}/environments/prod" --input - >/dev/null
-  gh api -X POST "repos/${REPO}/environments/prod/deployment-branch-policies" \
-    -f name=main -f type=branch >/dev/null 2>&1 || true
-  if [[ -z "$REVIEWER" ]]; then
-    echo "NOTE: no reviewer given — add required reviewers on the prod environment in repo Settings > Environments."
-  fi
-else
-  gh api -X PUT "repos/${REPO}/environments/${ENV_NAME}" >/dev/null
+log "GitHub environment: $ENV_NAME (deployable from main only)"
+body=$(jq -n '{deployment_branch_policy:{protected_branches:false, custom_branch_policies:true}}')
+if [[ "$ENV_NAME" == "prod" && -n "$REVIEWER" ]]; then
+  rid=$(gh api "users/${REVIEWER}" --jq .id)
+  body=$(echo "$body" | jq --argjson id "$rid" '. + {reviewers:[{type:"User", id:$id}]}')
+fi
+echo "$body" | gh api -X PUT "repos/${REPO}/environments/${ENV_NAME}" --input - >/dev/null
+gh api -X POST "repos/${REPO}/environments/${ENV_NAME}/deployment-branch-policies" \
+  -f name=main -f type=branch >/dev/null 2>&1 || true
+if [[ "$ENV_NAME" == "prod" && -z "$REVIEWER" ]]; then
+  echo "NOTE: no reviewer given — add required reviewers on the prod environment in repo Settings > Environments."
 fi
 fi
 
@@ -195,7 +204,7 @@ log "Done: $ENV_NAME"
 cat <<EOF
   tenant          $TENANT_ID
   subscription    $SUB_ID
-  client id       $APP_ID
-  identity        $IDENTITY_NAME
+  apply identity  $IDENTITY_NAME  (client id $APP_ID)
+  plan identity   $PLAN_IDENTITY_NAME  (client id $PLAN_APP_ID)
   state account   $SA_NAME
 EOF
