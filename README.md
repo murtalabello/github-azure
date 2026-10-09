@@ -119,8 +119,19 @@ the subjects it trusts. This repo's tokens use GitHub's **ID-based** subject for
 | `gh-env-dev-ids` / `gh-env-prod-ids` | `repo:murtalabello@61387158/github-azure@1410712234:environment:dev` (or `:prod`) | **Apply and destroy** jobs (they run inside a GitHub environment) |
 | `gh-branch-main`, `gh-pull-request`, `gh-env-<env>` | same as above but `repo:murtalabello/github-azure:…` | **Unused.** Old name-based format, created first. Harmless; safe to delete. |
 
-So a pull request can *plan* against prod, but can never *apply* to prod: applying requires the
-`environment:prod` subject, which GitHub only issues once the prod environment's approval passes.
+The pipelines only **apply** to prod from a job inside the `prod` environment, which waits for
+your approval.
+
+> **⚠️ Security limit: read this.** The approval protects the *pipeline*, not the *identity*. Plan
+> jobs (on `main` and on pull requests) sign in as the **same** identity that has **Contributor**
+> on the prod subscription. So anyone with **write access to this repo** could open a pull request
+> that edits a workflow file to run commands against prod, without any approval. (Pull requests
+> from **forks** cannot: GitHub does not give them sign-in tokens.) To close this gap, either:
+> - give plan jobs a separate identity that only has **Reader** on the subscription plus
+>   **Storage Blob Data Reader** on the state (two extra variables and a small workflow change), or
+> - delete the `gh-pull-request*` credentials from the prod identity, so pull requests cannot
+>   sign in to prod at all (PRs then only plan dev), and
+> - protect `main` with a branch rule that requires a review before merging.
 
 ### How the workflow passes the settings to Terraform
 
@@ -247,7 +258,7 @@ Everything below is in the repo's **Actions** tab → choose the pipeline → **
 | | dev | prod |
 |---|---|---|
 | Layer A (foundation) | ✅ exists | ✅ exists |
-| Layer B (VMs and network) | ❌ **destroyed** with `vm-destroy` (7 resources) | ❌ **destroyed** with `vm-destroy` (7 resources) |
+| Layer B (VMs and network) | ❌ **destroyed** with `vm-destroy` (VM, disk and network: 7 resources) | ❌ network **destroyed** with `vm-destroy` (7 resources). The VMs were never created (quota). |
 | Ready to deploy again | ✅ yes | ⚠️ waiting on Azure **quota** |
 
 **Prod quota:** the prod subscription allows **0 vCPUs** of the `Standard DSv5` family in South
