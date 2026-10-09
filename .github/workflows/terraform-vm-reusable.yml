@@ -30,8 +30,11 @@ permissions:
   pull-requests: write
 
 env:
-  # One managed identity per environment, each scoped to its own subscription.
-  ARM_CLIENT_ID: ${{ inputs.environment == 'prod' && vars.AZURE_CLIENT_ID_PROD || vars.AZURE_CLIENT_ID_DEV }}
+  # Each environment has its own subscription and two managed identities:
+  #   plan job  -> read-only identity (Reader + Storage Blob Data Reader), trusted for main and PRs
+  #   apply job -> write identity (Contributor + Storage Blob Data Contributor), trusted only for
+  #                jobs running in the GitHub environment (approval on prod)
+  # ARM_CLIENT_ID is set per job below.
   ARM_SUBSCRIPTION_ID: ${{ inputs.environment == 'prod' && vars.AZURE_SUBSCRIPTION_ID_PROD || vars.AZURE_SUBSCRIPTION_ID_DEV }}
   ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
   ARM_USE_OIDC: "true"
@@ -54,6 +57,10 @@ jobs:
       cancel-in-progress: false
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
+    env:
+      ARM_CLIENT_ID: ${{ inputs.environment == 'prod' && vars.AZURE_CLIENT_ID_PLAN_PROD || vars.AZURE_CLIENT_ID_PLAN_DEV }}
+      # A Reader cannot register resource providers; the apply identity does that if needed.
+      ARM_RESOURCE_PROVIDER_REGISTRATIONS: none
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -71,7 +78,7 @@ jobs:
         run: |
           missing=0
           for v in ARM_CLIENT_ID ARM_SUBSCRIPTION_ID ARM_TENANT_ID; do
-            if [ -z "${!v}" ]; then echo "::error::$v is empty — run scripts/bootstrap-azure-oidc.sh for ${{ inputs.environment }}"; missing=1; fi
+            if [ -z "${!v}" ]; then echo "::error::$v is empty — set the AZURE_* repo variables for ${{ inputs.environment }} (see README section 3)"; missing=1; fi
           done
           # Without id-token: write there is no OIDC token and the azurerm backend
           # silently retries other auth methods instead of failing.
@@ -141,9 +148,11 @@ jobs:
           if [ "${{ inputs.action }}" = "destroy" ]; then destroy_flag="-destroy"; fi
 
           set +e
+          # -lock=false: the read-only plan identity cannot lease the state blob. Runs for one
+          # environment are serialized by the concurrency group, and apply still takes the lock.
           terraform plan $destroy_flag \
             -var-file=env/${{ inputs.environment }}.tfvars \
-            -out=tfplan -detailed-exitcode -no-color -lock-timeout=5m
+            -out=tfplan -detailed-exitcode -no-color -lock=false
           code=$?
           set -e
 
@@ -211,6 +220,8 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    env:
+      ARM_CLIENT_ID: ${{ inputs.environment == 'prod' && vars.AZURE_CLIENT_ID_PROD || vars.AZURE_CLIENT_ID_DEV }}
     concurrency:
       group: tfstate-vm-${{ inputs.environment }}
       cancel-in-progress: false

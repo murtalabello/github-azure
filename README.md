@@ -41,16 +41,20 @@ Created once per environment, inside that environment's subscription.
 
 | Resource | dev | prod | What it is for |
 |---|---|---|---|
-| Resource group | `rg-tfstate-dev` | `rg-tfstate-prod` | Holds the two items below. Region: South Central US. |
+| Resource group | `rg-tfstate-dev` | `rg-tfstate-prod` | Holds everything below. Region: South Central US. |
 | Storage account | `sttfstatedevb0e407` | `sttfstateprod9da4cd` | Stores the Terraform **state file** (Terraform's record of what it created). Locked down: no public access, no shared keys (sign-in only), TLS 1.2+, file versioning and 30-day soft delete so a bad change can be undone. |
 | Blob container | `tfstate` | `tfstate` | The folder inside the storage account. State file: `vm/dev.tfstate` / `vm/prod.tfstate`. |
-| User-assigned managed identity | `id-gh-murtalabello-github-azure-dev` | `id-gh-murtalabello-github-azure-prod` | **The Azure "user" that GitHub Actions signs in as.** It has no password. |
-| Federated credentials (on the identity) | 6 | 6 | The rules that say *which* GitHub jobs may sign in as this identity. See [section 2](#2-how-it-is-all-wired-together). |
-| Role: **Contributor** on the whole subscription | ✅ | ✅ | Lets the identity create and delete resources (VMs, networks…) in its own subscription. |
-| Role: **Storage Blob Data Contributor** on the storage account | ✅ | ✅ | Lets the identity read and write the state file. |
+| **Apply identity** (user-assigned managed identity) | `id-gh-murtalabello-github-azure-dev` | `id-gh-murtalabello-github-azure-prod` | The Azure "user" that **apply and destroy** jobs sign in as. Can change things. Has no password. |
+| ↳ Role: **Contributor** on the whole subscription | ✅ | ✅ | Create, change and delete resources (VMs, networks…) in its own subscription. |
+| ↳ Role: **Storage Blob Data Contributor** on the storage account | ✅ | ✅ | Read and write the state file. |
+| ↳ Federated credentials | `gh-env-dev-ids` (+ unused `gh-env-dev`) | `gh-env-prod-ids` (+ unused `gh-env-prod`) | Only jobs running **inside the GitHub environment** may sign in. See [section 2](#2-how-it-is-all-wired-together). |
+| **Plan identity** (user-assigned managed identity) | `id-gh-murtalabello-github-azure-dev-plan` | `id-gh-murtalabello-github-azure-prod-plan` | The Azure "user" that **plan** jobs sign in as. **Read-only.** Has no password. |
+| ↳ Role: **Reader** on the whole subscription | ✅ | ✅ | See resources, but not change them. |
+| ↳ Role: **Storage Blob Data Reader** on the storage account | ✅ | ✅ | Read the state file, but not change it. |
+| ↳ Federated credentials | `gh-branch-main-ids`, `gh-pull-request-ids` | same | Jobs running from `main`, and pull-request jobs, may sign in. |
 | Resource providers registered | Compute, Network, Storage, ManagedIdentity (+ others Terraform registered on its first run) | same | A subscription must "switch on" a service before using it. One-time and free. |
 
-The dev identity has **no** permissions in the prod subscription, and the prod identity has
+The dev identities have **no** permissions in the prod subscription, and the prod identities have
 **no** permissions in the dev subscription.
 
 Also part of the foundation, on the GitHub side (details in [section 3](#3-everything-stored-in-github)):
@@ -91,15 +95,17 @@ All sizes, counts and address ranges come from `infra/vm/env/dev.tfvars` and `in
              │    "this is repo murtalabello/github-azure, running on branch main"
              ▼
  ┌────────────────────────┐ 3. Terraform sends that token to Microsoft Entra ID and says
- │ Microsoft Entra ID     │    "I want to act as identity <client ID>".
+ │ Microsoft Entra ID     │    "I want to act as identity <client ID>" (plan identity in a plan
+ │                        │    job, apply identity in an apply/destroy job).
  │ (Azure sign-in)        │ 4. Entra checks the identity's federated credentials: is there a rule
  │                        │    whose subject matches what the token says? If not, sign-in fails
  └───────────┬────────────┘    (AADSTS700213). If yes, it hands back an Azure access token.
              │ 5. With that Azure token, Terraform:
              ▼
  ┌──────────────────────────────────────── that environment's subscription ──────────────┐
- │  a) reads/writes the state file in sttfstate…  (Storage Blob Data Contributor role)   │
- │  b) creates/changes/deletes rg-app-<env>-vm and everything in it  (Contributor role)   │
+ │  plan job  (plan identity):  reads the state file and looks at what exists. Read-only.  │
+ │  apply job (apply identity): writes the state file and creates/changes/deletes          │
+ │                              rg-app-<env>-vm and everything in it.                      │
  └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -112,26 +118,24 @@ GitHub puts a **subject** in every token that describes the job. Each identity h
 the subjects it trusts. This repo's tokens use GitHub's **ID-based** subject format
 (`murtalabello@61387158/github-azure@1410712234`, where the numbers are the owner and repo IDs).
 
-| Credential name | Subject it trusts | Which jobs this lets in |
-|---|---|---|
-| `gh-branch-main-ids` | `repo:murtalabello@61387158/github-azure@1410712234:ref:refs/heads/main` | **Plan** jobs running from `main` |
-| `gh-pull-request-ids` | `repo:murtalabello@61387158/github-azure@1410712234:pull_request` | **Plan** jobs on pull requests |
-| `gh-env-dev-ids` / `gh-env-prod-ids` | `repo:murtalabello@61387158/github-azure@1410712234:environment:dev` (or `:prod`) | **Apply and destroy** jobs (they run inside a GitHub environment) |
-| `gh-branch-main`, `gh-pull-request`, `gh-env-<env>` | same as above but `repo:murtalabello/github-azure:…` | **Unused.** Old name-based format, created first. Harmless; safe to delete. |
+| Identity | Credential name | Subject it trusts | Which jobs this lets in |
+|---|---|---|---|
+| **plan** (read-only) | `gh-branch-main-ids` | `repo:murtalabello@61387158/github-azure@1410712234:ref:refs/heads/main` | Plan jobs running from `main` (pushes and "Run workflow") |
+| **plan** (read-only) | `gh-pull-request-ids` | `repo:murtalabello@61387158/github-azure@1410712234:pull_request` | Plan jobs on pull requests |
+| **apply** (write) | `gh-env-dev-ids` / `gh-env-prod-ids` | `repo:murtalabello@61387158/github-azure@1410712234:environment:dev` (or `:prod`) | Apply and destroy jobs, which run **inside** the GitHub environment |
+| **apply** (write) | `gh-env-dev` / `gh-env-prod` | same, but `repo:murtalabello/github-azure:…` | **Unused.** Old name-based format, created first. Harmless; safe to delete. |
 
-The pipelines only **apply** to prod from a job inside the `prod` environment, which waits for
-your approval.
+**What this protects.** The only identity that can change anything signs in **only** from a job
+inside the `dev` or `prod` GitHub environment, and both environments only accept jobs from `main`:
 
-> **⚠️ Security limit: read this.** The approval protects the *pipeline*, not the *identity*. Plan
-> jobs (on `main` and on pull requests) sign in as the **same** identity that has **Contributor**
-> on the prod subscription. So anyone with **write access to this repo** could open a pull request
-> that edits a workflow file to run commands against prod, without any approval. (Pull requests
-> from **forks** cannot: GitHub does not give them sign-in tokens.) To close this gap, either:
-> - give plan jobs a separate identity that only has **Reader** on the subscription plus
->   **Storage Blob Data Reader** on the state (two extra variables and a small workflow change), or
-> - delete the `gh-pull-request*` credentials from the prod identity, so pull requests cannot
->   sign in to prod at all (PRs then only plan dev), and
-> - protect `main` with a branch rule that requires a review before merging.
+- A **pull request** gets a read-only token. Even if someone edits a workflow file in a PR, it
+  can look at Azure but cannot change anything, and cannot run in the `dev`/`prod` environments.
+- A **push to `main`** can change dev (the normal pipeline does). Changing prod also needs
+  **your approval** on the `prod` environment.
+- Pull requests from **forks** get no Azure token at all (GitHub does not issue them one).
+
+Remaining trust: anyone who can push to `main` can change dev without review. Protect `main` with a
+branch rule (Settings → Branches → require a pull request and a review) to close that too.
 
 ### How the workflow passes the settings to Terraform
 
@@ -142,7 +146,9 @@ that Terraform's Azure provider reads automatically:
 |---|---|---|
 | `ARM_TENANT_ID` | `vars.AZURE_TENANT_ID` | Which Entra tenant to sign in to |
 | `ARM_SUBSCRIPTION_ID` | `vars.AZURE_SUBSCRIPTION_ID_DEV` or `_PROD` | Which subscription to build in |
-| `ARM_CLIENT_ID` | `vars.AZURE_CLIENT_ID_DEV` or `_PROD` | Which identity to act as |
+| `ARM_CLIENT_ID` (plan job) | `vars.AZURE_CLIENT_ID_PLAN_DEV` or `_PLAN_PROD` | Act as the **read-only** plan identity |
+| `ARM_CLIENT_ID` (apply job) | `vars.AZURE_CLIENT_ID_DEV` or `_PROD` | Act as the **write** apply identity |
+| `ARM_RESOURCE_PROVIDER_REGISTRATIONS=none` | fixed, plan job only | Don't try to register Azure services (a Reader isn't allowed to) |
 | `ARM_USE_OIDC=true` | fixed | Sign in with the GitHub token (not a password) |
 | `ARM_USE_AZUREAD=true` | fixed | Use sign-in (not storage keys) for the state file |
 | `TF_VAR_admin_ssh_public_key` | `vars.ADMIN_SSH_PUBLIC_KEY` | The SSH public key put on the Linux VMs |
@@ -154,15 +160,16 @@ The state file location comes from `infra/vm/env/<env>.backend.hcl`, passed to `
 
 ### How plan → approval → apply works
 
-1. **Plan job** signs in, runs `terraform plan`, saves the plan file, and uploads it to the run
-   as an artifact named `tfplan-vm-<env>` (kept for 1 day).
+1. **Plan job** signs in as the **read-only** plan identity, runs `terraform plan`, saves the plan
+   file, and uploads it to the run as an artifact named `tfplan-vm-<env>` (kept for 1 day).
 2. If the plan has **no changes**, the apply job is skipped.
 3. **Apply job** runs inside the GitHub environment (`dev` or `prod`). For prod, GitHub pauses here
    until you approve.
-4. Apply downloads **the exact plan file** from step 1 and applies it. So what you reviewed is
+4. Apply signs in as the **apply** identity, downloads **the exact plan file** from step 1 and applies it. So what you reviewed is
    exactly what happens. If something changed in the meantime, Terraform refuses the stale plan.
-5. Only one run per environment at a time (GitHub `concurrency` group), and Terraform also locks
-   the state file while it works.
+5. Only one job per environment at a time (GitHub `concurrency` group, shared by both pipelines).
+   Apply also locks the state file while it works. Plan reads the state **without** locking it,
+   because a read-only identity is not allowed to place the lock.
 
 ---
 
@@ -177,9 +184,11 @@ from this repo's own workflow jobs, because of the federated credentials.
 |---|---|---|
 | `AZURE_TENANT_ID` | `a0859c2c-6006-4f6c-8e7f-69a8fca8a849` | Both environments |
 | `AZURE_SUBSCRIPTION_ID_DEV` | `4db12431-b606-4b3d-a0bf-da48a2913526` | dev subscription |
-| `AZURE_CLIENT_ID_DEV` | `e53e62b3-39e3-403a-870c-a2fc8d05169d` | client ID of `id-gh-murtalabello-github-azure-dev` |
+| `AZURE_CLIENT_ID_DEV` | `e53e62b3-39e3-403a-870c-a2fc8d05169d` | client ID of the dev **apply** identity `id-gh-murtalabello-github-azure-dev` |
+| `AZURE_CLIENT_ID_PLAN_DEV` | `PLAN_DEV_CLIENT_ID` | client ID of the dev **plan** identity `id-gh-murtalabello-github-azure-dev-plan` |
 | `AZURE_SUBSCRIPTION_ID_PROD` | `184d2ede-e572-4d93-95bd-bfd15f8f9d24` | prod subscription |
-| `AZURE_CLIENT_ID_PROD` | `3663ea7b-1640-4fb6-9a22-4ac9b4c8eb2a` | client ID of `id-gh-murtalabello-github-azure-prod` |
+| `AZURE_CLIENT_ID_PROD` | `3663ea7b-1640-4fb6-9a22-4ac9b4c8eb2a` | client ID of the prod **apply** identity `id-gh-murtalabello-github-azure-prod` |
+| `AZURE_CLIENT_ID_PLAN_PROD` | `PLAN_PROD_CLIENT_ID` | client ID of the prod **plan** identity `id-gh-murtalabello-github-azure-prod-plan` |
 | `ADMIN_SSH_PUBLIC_KEY` | `ssh-ed25519 AAAA… muri@SandboxHost…` | **Public** half of the SSH key put on the VMs |
 
 ### Repository secrets (Settings → Secrets and variables → Actions → **Secrets**)
@@ -197,11 +206,11 @@ from this repo's own workflow jobs, because of the federated credentials.
 
 | Environment | Protection | Used by |
 |---|---|---|
-| `dev` | None: applies run straight away | dev apply and destroy jobs |
-| `prod` | **Required reviewer: `murtalabello`.** Every prod apply/destroy waits for approval. | prod apply and destroy jobs |
+| `dev` | **Deployment branches: `main` only.** No approval: applies run straight away. | dev apply and destroy jobs |
+| `prod` | **Deployment branches: `main` only.** **Required reviewer: `murtalabello`**: every prod apply/destroy waits for approval. | prod apply and destroy jobs |
 
-Recommended extra: in the `prod` environment, set **Deployment branches** to `main` only, so a
-workflow on another branch can never even ask for prod approval.
+"Deployment branches: `main` only" means a job from any other branch or a pull request is refused
+before it starts, so it can never get the apply identity's token.
 
 ### Where the actual secrets are (outside GitHub)
 
@@ -209,7 +218,7 @@ workflow on another branch can never even ask for prod approval.
 |---|---|
 | SSH **private** key matching `ADMIN_SSH_PUBLIC_KEY` | Only where it was created (`~/.ssh/id_ed25519` in Azure Cloud Shell). It is not in GitHub or Azure. **If it is lost, nobody can SSH into the VMs.** Keep a copy somewhere safe. |
 | Windows admin password (only if `os_type = "windows"`) | Generated by Terraform and kept in the **Terraform state file** (and in the plan artifact for up to 1 day). Read it with `terraform output -raw windows_admin_password`. |
-| Terraform state file | `sttfstate…/tfstate/vm/<env>.tfstate`. Can only be read by the GitHub identity and subscription owners. |
+| Terraform state file | `sttfstate…/tfstate/vm/<env>.tfstate`. Readable by that environment's two GitHub identities (only the apply identity can write it) and by subscription owners. |
 
 ---
 
@@ -287,15 +296,15 @@ Check: `az group show -n rg-app-dev-vm --subscription <dev-sub>` should say *not
 ```bash
 for env in dev prod; do
   [ $env = dev ] && sub=4db12431-b606-4b3d-a0bf-da48a2913526 || sub=184d2ede-e572-4d93-95bd-bfd15f8f9d24
-  id=id-gh-murtalabello-github-azure-$env
+  # Remove each identity's role on the subscription first (Contributor / Reader). Deleting an
+  # identity alone would leave an orphaned "Unknown" role assignment behind.
+  for id in id-gh-murtalabello-github-azure-$env id-gh-murtalabello-github-azure-$env-plan; do
+    pid=$(az identity show -g rg-tfstate-$env -n $id --subscription $sub --query principalId -o tsv)
+    az role assignment delete --assignee "$pid" --scope /subscriptions/$sub --subscription $sub
+  done
 
-  # Remove the identity's role on the subscription first. Deleting the identity alone would
-  # leave an orphaned "Unknown" role assignment behind.
-  pid=$(az identity show -g rg-tfstate-$env -n $id --subscription $sub --query principalId -o tsv)
-  az role assignment delete --assignee "$pid" --scope /subscriptions/$sub --subscription $sub
-
-  # Deletes the storage account (and the state files), the identity and its federated
-  # credentials, and the Storage Blob Data Contributor role assignment with it.
+  # Deletes the storage account (and the state files), both identities and their federated
+  # credentials, and the storage role assignments with them.
   az group delete -n rg-tfstate-$env --subscription $sub --yes
 done
 ```
@@ -304,8 +313,8 @@ done
 
 ```bash
 R=murtalabello/github-azure
-for v in AZURE_TENANT_ID AZURE_CLIENT_ID_DEV AZURE_SUBSCRIPTION_ID_DEV \
-         AZURE_CLIENT_ID_PROD AZURE_SUBSCRIPTION_ID_PROD ADMIN_SSH_PUBLIC_KEY; do
+for v in AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID_DEV AZURE_CLIENT_ID_DEV AZURE_CLIENT_ID_PLAN_DEV \
+         AZURE_SUBSCRIPTION_ID_PROD AZURE_CLIENT_ID_PROD AZURE_CLIENT_ID_PLAN_PROD ADMIN_SSH_PUBLIC_KEY; do
   gh variable delete $v -R $R
 done
 gh api -X DELETE repos/$R/environments/dev
@@ -339,10 +348,11 @@ git add infra/vm/env/*.backend.hcl && git commit -m "Point Terraform at the new 
 ```
 
 What the script does, in order: creates `rg-tfstate-<env>` and the locked-down state storage →
-creates the managed identity → adds the federated credentials → grants **Contributor** on the
-subscription and **Storage Blob Data Contributor** on the storage → sets the GitHub variables →
-creates the GitHub environment (prod gets you as required reviewer, `main` only) → writes the
-backend file. It is safe to re-run: it skips whatever already exists.
+creates the **apply** identity (environment sign-in only; **Contributor** + **Storage Blob Data
+Contributor**) → creates the **plan** identity (`main` and pull-request sign-in; **Reader** +
+**Storage Blob Data Reader**) → sets the GitHub variables → creates the GitHub environment
+(`main` only; prod also gets you as required reviewer) → writes the backend file. It is safe to
+re-run: it skips whatever already exists.
 
 Options: `-G` skips the GitHub part (it prints the values to set by hand); `-l <region>` changes
 the region (default `southcentralus`). Leave out `-S` if your repo's tokens use the plain
@@ -365,7 +375,9 @@ done
 | `AADSTS700213: No matching federated identity record` | The job's token subject is not in the identity's federated credentials. | Add a credential with the subject printed by the *Check Azure sign-in* step. |
 | `No GitHub OIDC token available` | The job is not allowed to request a sign-in token. | The job needs `permissions: id-token: write` (already set in these workflows). |
 | `… is empty — run scripts/bootstrap-azure-oidc.sh` | A repo variable is missing. | Set it in Settings → Variables (values in [section 3](#3-everything-stored-in-github)). |
-| State container returned HTTP 403 | The identity cannot read the state storage. | Give it **Storage Blob Data Contributor** on the storage account. |
+| State container returned HTTP 403 | The identity cannot read the state storage. | Plan identity needs **Storage Blob Data Reader**, apply identity needs **Storage Blob Data Contributor**, on the storage account. |
+| `AuthorizationFailed … does not have authorization to perform action '…/write'` in a **plan** job | Something tried to change Azure with the read-only identity. | Expected protection. Only apply jobs may change things. |
+| `Deployment … not allowed … branch protection rules` / job rejected by environment | A job from a branch other than `main` tried to use the `dev`/`prod` environment. | Expected protection. Merge to `main` first. |
 | `exceeding approved … Cores quota` | The subscription may not run that many vCPUs of that VM family in that region. | Request a quota increase, or choose a different `vm_size` in the tfvars. |
 | `Saved plan is stale` | Something changed between plan and apply. | Run the pipeline again to make a fresh plan. |
 | `Error acquiring the state lock` | Another run is using the state, or a run was cancelled mid-way. | Wait. If no run is active, break the lease on the state blob in the portal. |
